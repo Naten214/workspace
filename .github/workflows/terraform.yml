@@ -1,132 +1,63 @@
-trigger:
-  branches:
-    include:
+# overwrite the file with the correct content
+Set-Content .github/workflows/terraform.yml @'
+name: Terraform
+
+on:
+  push:
+    branches:
       - main
-  paths:
-    include:
-      - infra/terraform/*
+      - staging
+      - prod
+    paths:
+      - 'infra/terraform/**'
 
-variables:
-  - name: serviceConnection
-    value: sc-personal  # update to your ADO service connection name
-  - name: terraformVersion
-    value: 1.7.5
-  - name: workingDirectory
-    value: $(System.DefaultWorkingDirectory)/infra/terraform
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
 
-stages:
-  - stage: TerraformPlan
-    displayName: Terraform Plan
-    jobs:
-      - job: Plan
-        pool:
-          vmImage: ubuntu-latest
-        steps:
-          - script: |
-              wget -q https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
-              unzip terraform_$(terraformVersion)_linux_amd64.zip
-              sudo mv terraform /usr/local/bin/
-              terraform --version
-            displayName: Install Terraform
+jobs:
+  terraform:
+    name: Terraform Plan & Apply
+    runs-on: ubuntu-latest
 
-          - task: AzureCLI@2
-            displayName: Terraform Init
-            inputs:
-              azureSubscription: $(serviceConnection)
-              scriptType: bash
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-              inlineScript: |
-                export ARM_USE_OIDC=true
-                export ARM_OIDC_TOKEN=$idToken
-                export ARM_CLIENT_ID=$servicePrincipalId
-                export ARM_TENANT_ID=$tenantId
-                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                cd $(workingDirectory)
-                terraform init
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-          - task: AzureCLI@2
-            displayName: Terraform Plan
-            inputs:
-              azureSubscription: $(serviceConnection)
-              scriptType: bash
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-              inlineScript: |
-                export ARM_USE_OIDC=true
-                export ARM_OIDC_TOKEN=$idToken
-                export ARM_CLIENT_ID=$servicePrincipalId
-                export ARM_TENANT_ID=$tenantId
-                export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                cd $(workingDirectory)
-                terraform plan -out=tfplan
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
 
-          - task: PublishBuildArtifacts@1
-            displayName: Publish tfplan
-            inputs:
-              pathToPublish: $(workingDirectory)/tfplan
-              artifactName: tfplan
+      - name: Terraform Init
+        working-directory: infra/terraform
+        run: terraform init
 
-  - stage: TerraformApply
-    displayName: Terraform Apply
-    dependsOn: TerraformPlan
-    condition: succeeded()
-    jobs:
-      - deployment: Apply
-        displayName: Apply Infrastructure
-        pool:
-          vmImage: ubuntu-latest
-        environment: production
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
+      - name: Select Terraform Workspace
+        working-directory: infra/terraform
+        run: |
+          BRANCH=${GITHUB_REF_NAME}
+          if [ "$BRANCH" = "prod" ]; then
+            WORKSPACE="prod"
+          elif [ "$BRANCH" = "staging" ]; then
+            WORKSPACE="staging"
+          else
+            WORKSPACE="dev"
+          fi
+          terraform workspace select $WORKSPACE || terraform workspace new $WORKSPACE
+          echo "Using Terraform workspace: $WORKSPACE"
 
-                - script: |
-                    wget -q https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
-                    unzip terraform_$(terraformVersion)_linux_amd64.zip
-                    sudo mv terraform /usr/local/bin/
-                    terraform --version
-                  displayName: Install Terraform
+      - name: Terraform Plan
+        working-directory: infra/terraform
+        run: terraform plan -out=tfplan
 
-                - task: DownloadBuildArtifacts@1
-                  displayName: Download tfplan
-                  inputs:
-                    artifactName: tfplan
-                    downloadPath: $(Pipeline.Workspace)
+      - name: Terraform Apply
+        working-directory: infra/terraform
+        run: terraform apply -auto-approve tfplan
+'@
 
-                - task: AzureCLI@2
-                  displayName: Terraform Init
-                  inputs:
-                    azureSubscription: $(serviceConnection)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    addSpnToEnvironment: true
-                    inlineScript: |
-                      export ARM_USE_OIDC=true
-                      export ARM_OIDC_TOKEN=$idToken
-                      export ARM_CLIENT_ID=$servicePrincipalId
-                      export ARM_TENANT_ID=$tenantId
-                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                      terraform -chdir="$TF_DIR" init
-                  env:
-                    TF_DIR: $(System.DefaultWorkingDirectory)/infra/terraform
-
-                - task: AzureCLI@2
-                  displayName: Terraform Apply
-                  inputs:
-                    azureSubscription: $(serviceConnection)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    addSpnToEnvironment: true
-                    inlineScript: |
-                      export ARM_USE_OIDC=true
-                      export ARM_OIDC_TOKEN=$idToken
-                      export ARM_CLIENT_ID=$servicePrincipalId
-                      export ARM_TENANT_ID=$tenantId
-                      export ARM_SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-                      terraform -chdir="$TF_DIR" apply -auto-approve "$PLAN_FILE"
-                  env:
-                    TF_DIR: $(System.DefaultWorkingDirectory)/infra/terraform
-                    PLAN_FILE: $(Pipeline.Workspace)/tfplan/tfplan
+git add .github/workflows/terraform.yml
+git commit -m "Fix GitHub Actions workflow"
+git push origin main
